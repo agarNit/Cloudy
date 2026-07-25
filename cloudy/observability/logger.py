@@ -1,10 +1,16 @@
 import logging
+from pathlib import Path
 
 
-# Set root logger to WARNING — suppresses noisy third-party library logs (OpenAI, httpcore etc.)
+_LOG_DIR = Path(".cloudy")
+_LOG_DIR.mkdir(exist_ok=True)
+
+# Logs go to a file, not the console — the REPL owns the terminal output.
+# Root logger stays at WARNING to suppress noisy third-party logs (httpcore etc.)
 logging.basicConfig(
    level=logging.WARNING,
    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+   filename=str(_LOG_DIR / "cloudy.log"),
 )
 
 

@@ -8,6 +8,9 @@
 # Vector store data
 .chromadb/
 
+# Logs
+.cloudy/
+
 
 # Python
 __pycache__/

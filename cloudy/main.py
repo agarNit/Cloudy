@@ -1,7 +1,10 @@
 import asyncio
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.prompt import Prompt
 
 
@@ -19,87 +22,135 @@ from cloudy.observability.logger import get_logger
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 
+ACCENT = "#D97757"
+
+# Cycled while the agent is working, purely for flavor — no meaning behind the words.
+STATUS_WORDS = [
+   "Circumnambulating", "Augmenting", "Percolating", "Marinating",
+   "Ruminating", "Cogitating", "Noodling", "Wrangling", "Pontificating",
+   "Combobulating", "Synthesizing", "Divining", "Excogitating", "Deliberating",
+   "Spelunking", "Unspooling",
+]
+
 console = Console()
 logger = get_logger(__name__)
 
 
+class _InputPrompt(Prompt):
+   """Plain '❯ ' prompt with no trailing ': ' — Rich adds one by default."""
+   prompt_suffix = " "
+
+
+COMMANDS = {
+   "/new_session": "start a fresh conversation",
+   "/switch <id>": "resume a past session",
+   "/session": "show the current session id",
+   "/show_index": "inspect indexed code chunks",
+   "/help": "show this list",
+   "/exit": "quit",
+}
+
+
+def print_welcome(repo_path: str):
+   body = (
+       f"[bold {ACCENT}]Cloudy[/bold {ACCENT}] — RAG-powered code assistant\n"
+       f"[dim]{repo_path}[/dim]\n\n"
+       f"Ask anything about this codebase — just type and press enter.\n"
+       f"[dim]/help for commands · /exit to quit[/dim]"
+   )
+   console.print(Panel(body, border_style=ACCENT, padding=(1, 2)))
+
+
+def print_help():
+   console.print()
+   for cmd, desc in COMMANDS.items():
+       console.print(f"  [bold {ACCENT}]{cmd:<14}[/bold {ACCENT}] {desc}")
+   console.print()
+
+
+def ask_question() -> str:
+   width = max(console.size.width, 20)
+   console.print(f"[{ACCENT}]╭{'─' * (width - 2)}╮[/{ACCENT}]")
+   user_input = _InputPrompt.ask(f"[{ACCENT}]│[/{ACCENT}] [bold {ACCENT}]❯[/bold {ACCENT}]")
+   console.print(f"[{ACCENT}]╰{'─' * (width - 2)}╯[/{ACCENT}]")
+   return user_input
 
 
 def get_or_create_index():
    repo_path = str(Path.cwd())
    logger.info(f"Checking index for: {repo_path}")
-   console.print(f"[dim]Checking index for {repo_path}...[/dim]")
-   return get_indexer()(repo_path)
-
-
+   with console.status(f"[{ACCENT}]Indexing {repo_path}…[/{ACCENT}]", spinner="dots"):
+       index = get_indexer()(repo_path)
+   return index
 
 
 async def initialize(checkpointer):
    """Bootstrap LLM, embedder, index, MCP tools, and session before the REPL starts."""
-   llm = get_llm()
-   embedder = get_embedder()
-   console.print(f"[dim]LLM: {config['llm']['provider']} / {config['llm']['model']}[/dim]")
-   console.print(f"[dim]Embedder: {config['embeddings']['provider']} / {config['embeddings']['model']}[/dim]")
+   with console.status(f"[{ACCENT}]Starting up…[/{ACCENT}]", spinner="dots"):
+       llm = get_llm()
+       embedder = get_embedder()
+       index = get_or_create_index()
+       agent = await build_agent(checkpointer)
+       session_id = get_current_session()
 
-
-   index = get_or_create_index()
-   agent = await build_agent(checkpointer)
-   session_id = get_current_session()
-   console.print(f"[dim]Session: {session_id}[/dim]")
-   console.print(f"[green]✓ Ready[/green]\n")
+   console.print(
+       f"[dim]{config['llm']['provider']}/{config['llm']['model']} · "
+       f"{config['embeddings']['provider']}/{config['embeddings']['model']} · "
+       f"session {session_id[:8]}[/dim]\n"
+   )
    return llm, embedder, index, agent, session_id
-
-
 
 
 async def _run_async():
    logger.info("Starting Cloudy")
-   console.print("\n[bold blue]Cloudy[/bold blue] — RAG-powered code assistant")
-
+   repo_path = str(Path.cwd())
+   print_welcome(repo_path)
 
    async with AsyncSqliteSaver.from_conn_string(get_checkpointer_db_path()) as checkpointer:
        llm, embedder, index, agent, session_id = await initialize(checkpointer)
-       console.print("Type [bold]'/exit'[/bold] to quit\n")
-
 
        while True:
-           user_input = Prompt.ask("[bold green]>[/bold green]")
-
+           user_input = ask_question()
 
            if not user_input.strip():
                continue
-           if user_input.lower() in ("/exit", "/quit"):
+
+           if not user_input.startswith("/"):
+               logger.info(f"Question received: {user_input}")
+               status_word = random.choice(STATUS_WORDS)
+               with console.status(f"[{ACCENT}]{status_word}…[/{ACCENT}]", spinner="dots"):
+                   response, stats = await handle_query(agent, user_input, session_id)
+               console.print(Markdown(response))
+               total_tokens = stats["input_tokens"] + stats["output_tokens"]
+               console.print(
+                   f"[dim]{stats['elapsed_seconds']:.1f}s · {total_tokens} tokens[/dim]\n"
+               )
+               continue
+
+           command, _, arg = user_input.partition(" ")
+           command = command.lower()
+
+           if command in ("/exit", "/quit"):
                logger.info("Shutting down")
-               console.print("[dim]Goodbye![/dim]")
+               console.print(f"[dim]Goodbye![/dim]")
                break
-           elif user_input.startswith("/ask "):
-               question = user_input.removeprefix("/ask ").strip()
-               logger.info(f"Ask command received: {question}")
-               console.print(f"[dim]Searching for: {question}...[/dim]")
-               response = await handle_query(agent, question, session_id)
-               console.print(response)
-           elif user_input == "/new_session":
+           elif command == "/help":
+               print_help()
+           elif command == "/new_session":
                session_id = new_session()
-               console.print(f"[green]New session started: {session_id}[/green]")
-           elif user_input.startswith("/switch "):
-               target = user_input.removeprefix("/switch ").strip()
-               session_id = switch_session(target)
-               console.print(f"[green]Switched to session: {session_id}[/green]")
-           elif user_input == "/session":
-               console.print(f"[dim]Current session: {session_id}[/dim]")
-           elif user_input == "/show_index":
+               console.print(f"[{ACCENT}]New session started: {session_id}[/{ACCENT}]\n")
+           elif command == "/switch":
+               session_id = switch_session(arg.strip())
+               console.print(f"[{ACCENT}]Switched to session: {session_id}[/{ACCENT}]\n")
+           elif command == "/session":
+               console.print(f"[dim]Current session: {session_id}[/dim]\n")
+           elif command == "/show_index":
                logger.info("Showing index")
                get_index_inspector()(index)
            else:
                logger.warning(f"Unknown command received: {user_input}")
-               console.print("[yellow]Unknown command. Try:[/yellow]")
-               console.print("  [bold]/ask <question>[/bold]          — ask a question about the codebase")
-               console.print("  [bold]/show_index[/bold]              — show all chunks in the index")
-               console.print("  [bold]/new_session[/bold]             — start a fresh conversation")
-               console.print("  [bold]/switch <session_id>[/bold]     — resume a past session")
-               console.print("  [bold]/session[/bold]                 — show current session id")
-
-
+               console.print(f"[yellow]Unknown command: {command}[/yellow]")
+               print_help()
 
 
 def run():
