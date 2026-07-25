@@ -12,8 +12,9 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Tool-using agent** — `search_codebase` (RAG), filesystem tools (`read_file`, `write_file`, `append_file`, `delete_file`, `list_directory`, `file_exists`), and sandboxed shell tools (`run_command`, `run_in_directory` — blocked dangerous commands, 30s timeout).
 - **MCP integration** — additional tools are loaded dynamically from external MCP servers (e.g. GitHub, filesystem) declared in `servers.json`, via `langchain-mcp-adapters`.
 - **Persistent memory** — conversations are checkpointed to SQLite (`AsyncSqliteSaver`) with automatic summarization once a conversation grows past a token threshold, plus lightweight session management (start/switch/resume).
-- **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls).
+- **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
 - **Config-driven** — LLM provider/model, embedding model, vector store, and retrieval mode are all controlled from a single `config.yaml`.
+- **Claude-style CLI** — boxed input prompt, Markdown-rendered answers, a playful "thinking" status while the agent works, and a per-turn `elapsed time · token count` footer.
 
 ## Architecture
 
@@ -95,16 +96,30 @@ python -m cloudy.main
 
 On first run, Cloudy indexes the current directory into the configured vector store; subsequent runs reuse the existing index.
 
+Just type a question and press enter — no command prefix needed:
+
+```
+╭──────────────────────────────────────────────────────────╮
+│ ❯ how does the search_codebase tool work?
+╰──────────────────────────────────────────────────────────╯
+```
+
+The answer is rendered as Markdown, followed by a `<elapsed time> · <tokens used>` footer for that turn.
+
 ### REPL commands
+
+Anything not starting with `/` is treated as a question for the agent. Reserved commands:
 
 | Command | Description |
 |---|---|
-| `/ask <question>` | Ask a question about the indexed codebase |
+| `/help` | Show available commands |
 | `/show_index` | Inspect all indexed chunks |
 | `/new_session` | Start a fresh conversation (new memory thread) |
 | `/switch <session_id>` | Resume a previous session |
 | `/session` | Show the current session id |
 | `/exit`, `/quit` | Quit |
+
+Logs (indexing, retrieval, tool calls) go to `.cloudy/cloudy.log`, not the terminal.
 
 ## Why this project exists
 
