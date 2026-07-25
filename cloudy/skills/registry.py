@@ -43,12 +43,12 @@ class SkillRegistry:
            "python_debug": {
                "meta":      {"name": "python_debug", "description": "...", ...},
                "body":      "You are an expert Python debugger. Follow these steps...",
-               "skill_dir": Path(".educosys/skills/python_debug")
+               "skill_dir": Path(".cloudy/skills/python_debug")
            },
            "write_tests": {
                "meta":      {"name": "write_tests", "description": "...", ...},
                "body":      "Generate pytest unit tests...",
-               "skill_dir": Path(".educosys/skills/write_tests")
+               "skill_dir": Path(".cloudy/skills/write_tests")
            }
        }
 

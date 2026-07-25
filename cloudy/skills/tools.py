@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 # One SkillRegistry instance is shared for the entire process lifetime.
 # It is created lazily on the first call to get_registry() — not at import time —
 # so that Path.cwd() resolves to the target project directory, not the
-# educosys_claude package directory.
+# cloudy package directory.
 #
 # State transitions:
 #   None  ──(first call to get_registry())──►  SkillRegistry (loaded)
@@ -39,20 +39,20 @@ def get_registry() -> SkillRegistry:
 
 
    skills_dir resolution order:
-     1. Read "skills.skills_dir" from config.yaml  →  e.g. ".educosys/skills"
+     1. Read "skills.skills_dir" from config.yaml  →  e.g. ".cloudy/skills"
      2. Resolve relative to Path.cwd()             →  the target project root
-        (educosys_claude is invoked from the project being analysed, so cwd()
-         IS the target project, not the educosys package itself)
+        (cloudy is invoked from the project being analysed, so cwd()
+         IS the target project, not the cloudy package itself)
 
 
    Example:
-     User runs educosys_claude from /home/user/my_project/
-     config.yaml says skills_dir: .educosys/skills
-     → skills are loaded from /home/user/my_project/.educosys/skills/
+     User runs cloudy from /home/user/my_project/
+     config.yaml says skills_dir: .cloudy/skills
+     → skills are loaded from /home/user/my_project/.cloudy/skills/
    """
    global _registry
    if _registry is None:
-       skills_dir = Path.cwd() / config.get("skills", {}).get("skills_dir", ".educosys/skills")
+       skills_dir = Path.cwd() / config.get("skills", {}).get("skills_dir", ".cloudy/skills")
        _registry = SkillRegistry(skills_dir)
        _registry.load()
        logger.info(f"SkillRegistry initialized from: {skills_dir}")
