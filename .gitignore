@@ -18,10 +18,6 @@ __pycache__/
 *.pyo
 
 
-# Poetry
-poetry.lock
-
-
 # Virtual environments
 .venv/
 venv/

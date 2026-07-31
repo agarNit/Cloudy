@@ -69,7 +69,7 @@ def print_help():
 
 
 def ask_question() -> str:
-   width = max(console.size.width, 20)
+   width = max(console.size.width, 40)
    console.print(f"[{ACCENT}]╭{'─' * (width - 2)}╮[/{ACCENT}]")
    user_input = _InputPrompt.ask(f"[{ACCENT}]│[/{ACCENT}] [bold {ACCENT}]❯[/bold {ACCENT}]")
    console.print(f"[{ACCENT}]╰{'─' * (width - 2)}╯[/{ACCENT}]")

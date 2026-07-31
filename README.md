@@ -9,7 +9,7 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Agentic loop** — built on LangChain/LangGraph's `create_agent`, with a system prompt that forces the agent to search the codebase before answering.
 - **Code-aware indexing** — source files are parsed with [tree-sitter](https://tree-sitter.github.io/tree-sitter/) into function/class-level chunks (Python, JS/TS, Java, Go, Rust, C/C++, C#, Ruby, PHP, Swift, Kotlin, Bash); text/config files fall back to an overlapping sliding-window chunker.
 - **Pluggable retrieval** — swap between Qdrant (dense/sparse/hybrid) and Chroma (semantic) purely via `config.yaml`, no code changes.
-- **Tool-using agent** — `search_codebase` (RAG), filesystem tools (`read_file`, `write_file`, `append_file`, `delete_file`, `list_directory`, `file_exists`), and sandboxed shell tools (`run_command`, `run_in_directory` — blocked dangerous commands, 30s timeout).
+- **Tool-using agent** — `search_codebase` (RAG), filesystem tools (`read_file`, `write_file`, `append_file`, `list_directory`, `file_exists`), and shell tools (`run_command`, `run_in_directory` — blocklist for a few known-dangerous commands, 30s timeout).
 - **MCP integration** — additional tools are loaded dynamically from external MCP servers (e.g. GitHub, filesystem) declared in `servers.json`, via `langchain-mcp-adapters`.
 - **Persistent memory** — conversations are checkpointed to SQLite (`AsyncSqliteSaver`) with automatic summarization once a conversation grows past a token threshold, plus lightweight session management (start/switch/resume).
 - **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
@@ -27,7 +27,7 @@ cloudy/
 │   ├── orchestrator.py        # entrypoint that invokes the agent per query
 │   └── tools.py                # search_codebase (RAG) tool
 ├── tools/
-│   ├── filesystem_tools.py    # read/write/append/delete/list/exists
+│   ├── filesystem_tools.py    # read/write/append/list/exists
 │   └── terminal_tools.py      # sandboxed shell execution
 ├── mcp/
 │   ├── client.py               # connects to MCP servers, collects their tools
