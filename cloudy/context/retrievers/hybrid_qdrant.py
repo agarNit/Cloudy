@@ -3,7 +3,7 @@ from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
 
 
 from cloudy.config import config
-from cloudy.llm.factory import get_embedder
+from cloudy.llm.factory import get_embedder, EMBED_LOCK
 from cloudy.observability.logger import get_logger
 
 
@@ -27,18 +27,20 @@ def retrieve(query: str, k: int = 5) -> list[dict]:
    retrieval_mode = RETRIEVAL_MODE_MAP.get(mode, RetrievalMode.HYBRID)
 
 
-   vector_store = QdrantVectorStore.from_existing_collection(
-       embedding=embedder,
-       sparse_embedding=FastEmbedSparse(model_name="Qdrant/bm25"),
-       retrieval_mode=retrieval_mode,
-       url=os.getenv("QDRANT_URL"),
-       api_key=os.getenv("QDRANT_API_KEY"),
-       collection_name=collection_name,
-   )
-
-
    logger.info(f"Retrieving top {k} chunks — mode: {mode} — query: {query}")
-   results = vector_store.similarity_search_with_score(query, k=k)
+   # Construction (FastEmbedSparse loads its own model) and search both touch native
+   # ML code, and both can run concurrently across threads when the agent makes
+   # parallel tool calls — hold the lock across the whole thing, not just the search.
+   with EMBED_LOCK:
+       vector_store = QdrantVectorStore.from_existing_collection(
+           embedding=embedder,
+           sparse_embedding=FastEmbedSparse(model_name="Qdrant/bm25"),
+           retrieval_mode=retrieval_mode,
+           url=os.getenv("QDRANT_URL"),
+           api_key=os.getenv("QDRANT_API_KEY"),
+           collection_name=collection_name,
+       )
+       results = vector_store.similarity_search_with_score(query, k=k)
 
 
    chunks = []

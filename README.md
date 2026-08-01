@@ -15,6 +15,9 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Session management** — mirrors Claude Code's CLI: every launch starts a brand new session by default; `--continue`/`-c` reattaches to the most recently active one, `--resume`/`-r` lets you pick from a list — all scoped to the current project directory.
 - **Episodic memory** — when a session ends (`/new_session`, `/switch`, `/exit`, or Ctrl+C), its conversation is summarized and embedded, then stored in a `session_log` table. `/sessions` shows past sessions with their real summaries instead of bare timestamps, and the agent can call `find_session` to semantically search across all of them — e.g. "did I ask about X before?" from a brand new session. Sessions that end without a clean exit (crash, killed process) are backfilled on the next launch, so summaries stay eventually-consistent regardless of how a session actually ended.
 - **Long-term (semantic) memory** — separate from episodic session summaries: durable, cross-session facts/preferences/decisions, stored in a `long_term_memory` table under one of three categories (`preference`, `feedback`, `project`), upserted by `(category_type, category)` so re-saving the same topic updates it instead of duplicating. A compact summary index is always in the system prompt (progressive disclosure, same shape as skills); full detail loads on demand via `recall_memory`. Save trigger is hybrid: the agent auto-calls `save_memory` when the user corrects its approach or a firm project decision is reached — tested reliable (3/3+ across runs). Getting the model to *reliably volunteer* a save purely from natural-language "remember that..." proved unreliable with `claude-haiku-4-5` once multiple tools/instructions were competing for attention (0/5 in the full prompt despite 4/5 in isolation) — so explicit saves go through a deterministic `/remember <text>` command instead of depending on LLM judgment for that path.
+- **Plan mode** — `/plan <task>` hands the conversation to a *separate*, structurally read-only agent (no write/shell tools exist for it — not just told not to use them) that discusses the task, uses `search_codebase`/`read_file`/etc. to understand the repo, and proposes a step-by-step plan via LangChain's `write_todos` tool. The plan itself requires approval before anything is committed; once approved it's rendered in a boxed panel and execution starts automatically on the full agent, in the same session, tracked against the same todo list.
+- **Human-in-the-loop approvals** — built on `HumanInTheLoopMiddleware` (real LangGraph interrupts, not prompt-level hoping): `write_file`/`append_file` always require approval, `run_command`/`run_in_directory` only when the command itself looks destructive (`rm`, `kill`, `dd`, `chmod`, etc. — everyday commands like `ls`/`pytest` auto-run). Three-way decision at every gate: **approve**, **reject** (with a reason), or **talk about it** (free-form pushback — the model sees it and can resolve it or re-propose, either within the same turn or after your next message). Rejection was verified with a real, checkable side effect (not just "the command errored") to confirm it actually blocks execution, not just that the model claims it did.
+- **Resumable across crashes** — approvals are LangGraph interrupts, which are checkpointed like everything else. Killing the process (or Ctrl+C, which now cancels just the current turn instead of the whole app) mid-approval leaves it durably paused; relaunching and returning to that session (`--continue`, `--resume`, or `/switch`) re-surfaces the exact same pending decision instead of silently dropping it. Verified this works even when the reattaching agent object has a different tool/middleware configuration than the one that raised the interrupt (plan agent → execution agent).
 - **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
 - **Config-driven** — LLM provider/model, embedding model, vector store, and retrieval mode are all controlled from a single `config.yaml`.
 - **Claude-style CLI** — boxed input prompt, Markdown-rendered answers, a playful "thinking" status while the agent works, and a per-turn `elapsed time · token count` footer.
@@ -26,8 +29,8 @@ cloudy/
 ├── main.py                    # CLI entrypoint / REPL loop
 ├── config.py, config.yaml     # central runtime configuration
 ├── agent/
-│   ├── factory.py             # builds the LangChain agent + tool list
-│   ├── orchestrator.py        # entrypoint that invokes the agent per query
+│   ├── factory.py             # builds the execution agent + read-only plan agent, HITL gating config
+│   ├── orchestrator.py        # invokes the agent per turn; detects/resumes interrupts (QueryResult)
 │   └── tools.py                # search_codebase (RAG) tool
 ├── tools/
 │   ├── filesystem_tools.py    # read/write/append/list/exists
@@ -118,6 +121,8 @@ Anything not starting with `/` is treated as a question for the agent. Reserved 
 | Command | Description |
 |---|---|
 | `/help` | Show available commands |
+| `/plan <task>` | Discuss and approve a plan before anything gets built |
+| `/cancel_plan` | Leave plan mode without executing anything |
 | `/show_index` | Inspect all indexed chunks |
 | `/new_session` | Start a fresh conversation (new memory thread) |
 | `/switch <session_id>` | Resume a previous session |

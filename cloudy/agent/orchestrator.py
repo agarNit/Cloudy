@@ -1,6 +1,8 @@
 import time
+from dataclasses import dataclass, field
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langgraph.types import Command
 
 from cloudy.observability.logger import get_logger
 from cloudy.memory.session import touch_session
@@ -25,29 +27,91 @@ class _TokenCounter(BaseCallbackHandler):
                   self.output_tokens += usage.get("output_tokens", 0)
 
 
-async def handle_query(agent, question: str, thread_id: str) -> tuple[str, dict]:
-  """Entry point for all user queries - invokes the agent.
+@dataclass
+class ApprovalRequest:
+  """One tool call a HumanInTheLoopMiddleware gate is holding, awaiting a decision."""
+  name: str
+  args: dict
+  description: str
 
-  Returns (answer, stats) where stats has elapsed_seconds/input_tokens/output_tokens
-  for just this call — the checkpointer accumulates full thread history, so token
-  counts are captured via a per-call callback rather than summed from the messages.
+
+@dataclass
+class QueryResult:
+  """Outcome of a single agent.ainvoke — either a final answer, or a set of pending
+  approvals the caller must resolve (via resume_query) before the turn can continue.
   """
-  logger.info(f"Handling query for session {thread_id}: {question}")
-  counter = _TokenCounter()
-  agent_config = {"configurable": {"thread_id": thread_id}, "callbacks": [counter]}
-  started = time.monotonic()
-  try:
-      response = await agent.ainvoke({"messages": [{"role": "user", "content": question}]}, agent_config)
-      answer = response["messages"][-1].content
-  except Exception as e:
-      logger.error(f"Agent error: {e}")
-      answer = f"Error: {e}"
+  kind: str  # "answer" | "approval"
+  answer: str | None = None
+  approvals: list[ApprovalRequest] = field(default_factory=list)
+  todos: list[dict] = field(default_factory=list)
+  stats: dict = field(default_factory=dict)
 
-  await touch_session(thread_id)
 
-  stats = {
+def _stats(started: float, counter: _TokenCounter) -> dict:
+  return {
       "elapsed_seconds": time.monotonic() - started,
       "input_tokens": counter.input_tokens,
       "output_tokens": counter.output_tokens,
   }
-  return answer, stats
+
+
+def _to_result(response: dict, stats: dict) -> QueryResult:
+  todos = response.get("todos") or []
+  if "__interrupt__" in response:
+      payload = response["__interrupt__"][0].value
+      approvals = [
+          ApprovalRequest(name=a["name"], args=a["args"], description=a.get("description", ""))
+          for a in payload["action_requests"]
+      ]
+      return QueryResult(kind="approval", approvals=approvals, todos=todos, stats=stats)
+
+  answer = response["messages"][-1].content
+  return QueryResult(kind="answer", answer=answer, todos=todos, stats=stats)
+
+
+async def _invoke(agent, payload, thread_id: str) -> QueryResult:
+  counter = _TokenCounter()
+  agent_config = {"configurable": {"thread_id": thread_id}, "callbacks": [counter]}
+  started = time.monotonic()
+  try:
+      response = await agent.ainvoke(payload, agent_config)
+  except Exception as e:
+      logger.error(f"Agent error: {e}")
+      return QueryResult(kind="answer", answer=f"Error: {e}", stats=_stats(started, counter))
+
+  result = _to_result(response, _stats(started, counter))
+  if result.kind == "answer":
+      await touch_session(thread_id)
+  return result
+
+
+async def handle_query(agent, question: str, thread_id: str) -> QueryResult:
+  """Entry point for a new user question — may return a final answer or a pending
+  approval if a HumanInTheLoopMiddleware gate fires during this turn.
+  """
+  logger.info(f"Handling query for session {thread_id}: {question}")
+  return await _invoke(agent, {"messages": [{"role": "user", "content": question}]}, thread_id)
+
+
+async def resume_query(agent, decisions: list[dict], thread_id: str) -> QueryResult:
+  """Continue a turn after the caller has collected decisions for a pending approval.
+  May itself return another pending approval if more gates fire further down the line.
+  """
+  logger.info(f"Resuming session {thread_id} with {len(decisions)} decision(s)")
+  return await _invoke(agent, Command(resume={"decisions": decisions}), thread_id)
+
+
+async def get_pending_approval(agent, thread_id: str) -> list[ApprovalRequest]:
+  """Check whether this thread is currently paused at an approval gate — e.g. the
+  process died or the user disconnected before answering. Lets a resumed session
+  re-present the same pending decision instead of silently dropping it.
+  """
+  snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
+  for task in snapshot.tasks:
+      if task.interrupts:
+          payload = task.interrupts[0].value
+          return [
+              ApprovalRequest(name=a["name"], args=a["args"], description=a.get("description", ""))
+              for a in payload["action_requests"]
+          ]
+  return []

@@ -5,11 +5,20 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from cloudy.memory.db import db_path as _db_path
-from cloudy.llm.factory import get_llm, get_embedder
+from cloudy.llm.factory import get_llm, get_embedder, EMBED_LOCK
 from cloudy.observability.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _embed(embedder, text: str) -> list[float]:
+    """Run in a worker thread via asyncio.to_thread — the lock protects against
+    running concurrently with another thread also using the embedder (e.g. a
+    parallel search_codebase call), not against being on a worker thread itself.
+    """
+    with EMBED_LOCK:
+        return embedder.embed_query(text)
 
 
 _SUMMARY_PROMPT = (
@@ -96,7 +105,7 @@ async def close_session(checkpointer, session_id: str) -> None:
             return
 
         embedder = get_embedder()
-        vector = await asyncio.to_thread(embedder.embed_query, summary)
+        vector = await asyncio.to_thread(_embed, embedder, summary)
         now = datetime.now(timezone.utc).isoformat()
 
         async with aiosqlite.connect(_db_path()) as db:
@@ -175,7 +184,7 @@ async def find_sessions(query: str, k: int = 5) -> list[dict]:
         return []
 
     embedder = get_embedder()
-    query_vec = await asyncio.to_thread(embedder.embed_query, query)
+    query_vec = await asyncio.to_thread(_embed, embedder, query)
 
     scored = []
     for row in rows:
