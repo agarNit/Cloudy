@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 
 from cloudy.config import config
 from cloudy.context.indexers.factory import get_indexer, get_index_inspector
+from cloudy.context.freshness import seed_manifest_if_empty, sync_index
 from cloudy.llm.factory import get_llm, get_embedder
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from cloudy.agent.factory import build_agent, build_plan_agent
@@ -32,6 +33,10 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 ACCENT = "#D97757"
+
+# How often the background freshness check runs while a session is open. Cheap
+# when nothing's changed (just mtime comparisons), so this can be fairly tight.
+FRESHNESS_INTERVAL_SECONDS = 20
 
 # Cycled while the agent is working, purely for flavor — no meaning behind the words.
 STATUS_WORDS = [
@@ -58,6 +63,7 @@ COMMANDS = {
    "/sessions": "list past sessions for this project",
    "/session": "show the current session id",
    "/remember <text>": "save a preference to long-term memory",
+   "/reindex": "manually check for and index file changes",
    "/show_index": "inspect indexed code chunks",
    "/help": "show this list",
    "/exit": "quit",
@@ -309,6 +315,41 @@ def get_or_create_index():
    return index
 
 
+def _freshness_enabled() -> bool:
+   # Freshness sync is Qdrant-specific (payload filters, client.delete) — only
+   # wire it up when that's actually the active retrieval backend, so switching
+   # config to the Chroma path doesn't crash against the wrong vector store shape.
+   return config["rag"]["mode"] == "hybrid" and config["vector_store"]["provider"] == "qdrant"
+
+
+def report_freshness(result: dict, quiet_if_empty: bool = True):
+   total = len(result["added"]) + len(result["updated"]) + len(result["deleted"])
+   if total == 0:
+       if not quiet_if_empty:
+           console.print(f"[dim]No changes found.[/dim]\n")
+       return
+   console.print(
+       f"[dim]Index updated — {len(result['added'])} added, "
+       f"{len(result['updated'])} updated, {len(result['deleted'])} deleted.[/dim]\n"
+   )
+
+
+async def freshness_loop(repo_path: str, index):
+   """Runs for as long as the session is open, checking for file changes on a
+   fixed interval. Cancelled cleanly on exit — see the finally block in
+   _run_async.
+   """
+   while True:
+       await asyncio.sleep(FRESHNESS_INTERVAL_SECONDS)
+       try:
+           result = await sync_index(repo_path, index)
+           report_freshness(result)
+       except asyncio.CancelledError:
+           raise
+       except Exception as e:
+           logger.error(f"Background freshness sync failed: {e}")
+
+
 async def resolve_session_id(args: argparse.Namespace) -> str:
    """Decide which session to start with, mirroring Claude Code's CLI semantics:
    default is always a brand new session; --continue/--resume are explicit opt-ins
@@ -370,6 +411,13 @@ async def _run_async(args: argparse.Namespace):
        console.print(f"[dim]session {session_id[:8]}[/dim]\n")
 
        await check_pending_approval(agent, session_id)
+
+       freshness_task = None
+       if _freshness_enabled():
+           with console.status(f"[{ACCENT}]Checking for file changes…[/{ACCENT}]", spinner="dots"):
+               await seed_manifest_if_empty(repo_path)
+               await sync_index(repo_path, index)
+           freshness_task = asyncio.create_task(freshness_loop(repo_path, index))
 
        mode = "chat"  # "chat" | "planning"
 
@@ -448,6 +496,13 @@ async def _run_async(args: argparse.Namespace):
                        with console.status(f"[{ACCENT}]Saving…[/{ACCENT}]", spinner="dots"):
                            result = await remember(arg)
                        console.print(f"[{ACCENT}]{result}[/{ACCENT}]\n")
+               elif command == "/reindex":
+                   if not _freshness_enabled():
+                       console.print(f"[yellow]Freshness sync isn't available for the current vector store config.[/yellow]\n")
+                   else:
+                       with console.status(f"[{ACCENT}]Checking for file changes…[/{ACCENT}]", spinner="dots"):
+                           result = await sync_index(repo_path, index)
+                       report_freshness(result, quiet_if_empty=False)
                elif command == "/show_index":
                    logger.info("Showing index")
                    get_index_inspector()(index)
@@ -456,6 +511,12 @@ async def _run_async(args: argparse.Namespace):
                    console.print(f"[yellow]Unknown command: {command}[/yellow]")
                    print_help()
        finally:
+           if freshness_task is not None:
+               freshness_task.cancel()
+               try:
+                   await freshness_task
+               except asyncio.CancelledError:
+                   pass
            # Runs on /exit, on Ctrl+C at the prompt itself, and on any crash inside
            # the loop — the one path we can't cover this way is the process being
            # killed outright (SIGKILL, terminal force-closed); backfill_missing_summaries

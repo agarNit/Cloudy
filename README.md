@@ -18,6 +18,7 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Plan mode** — `/plan <task>` hands the conversation to a *separate*, structurally read-only agent (no write/shell tools exist for it — not just told not to use them) that discusses the task, uses `search_codebase`/`read_file`/etc. to understand the repo, and proposes a step-by-step plan via LangChain's `write_todos` tool. The plan itself requires approval before anything is committed; once approved it's rendered in a boxed panel and execution starts automatically on the full agent, in the same session, tracked against the same todo list.
 - **Human-in-the-loop approvals** — built on `HumanInTheLoopMiddleware` (real LangGraph interrupts, not prompt-level hoping): `write_file`/`append_file` always require approval, `run_command`/`run_in_directory` only when the command itself looks destructive (`rm`, `kill`, `dd`, `chmod`, etc. — everyday commands like `ls`/`pytest` auto-run). Three-way decision at every gate: **approve**, **reject** (with a reason), or **talk about it** (free-form pushback — the model sees it and can resolve it or re-propose, either within the same turn or after your next message). Rejection was verified with a real, checkable side effect (not just "the command errored") to confirm it actually blocks execution, not just that the model claims it did.
 - **Resumable across crashes** — approvals are LangGraph interrupts, which are checkpointed like everything else. Killing the process (or Ctrl+C, which now cancels just the current turn instead of the whole app) mid-approval leaves it durably paused; relaunching and returning to that session (`--continue`, `--resume`, or `/switch`) re-surfaces the exact same pending decision instead of silently dropping it. Verified this works even when the reattaching agent object has a different tool/middleware configuration than the one that raised the interrupt (plan agent → execution agent).
+- **Index freshness** — the index is no longer build-once-and-forget. A background check (`FRESHNESS_INTERVAL_SECONDS`, default 20s) diffs the repo against a local manifest (mtime + content hash) and incrementally updates just what changed: new files indexed, modified files have their old chunks deleted and replaced, removed files have their chunks deleted — never a full rebuild. A settle window (default 8s) delays reacting to a change until the file's been untouched for a bit, approximating "this edit is finished" since there's no commit boundary to use as an explicit signal. Runs once at startup (catches anything changed while Cloudy wasn't running) and then on the background interval; `/reindex` triggers it manually. Qdrant-specific (needs a payload index on `metadata.source`, created automatically); degrades to no freshness tracking if the config points at the Chroma backend instead.
 - **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
 - **Config-driven** — LLM provider/model, embedding model, vector store, and retrieval mode are all controlled from a single `config.yaml`.
 - **Claude-style CLI** — boxed input prompt, Markdown-rendered answers, a playful "thinking" status while the agent works, and a per-turn `elapsed time · token count` footer.
@@ -40,7 +41,8 @@ cloudy/
 │   └── config.py               # loads & resolves servers.json
 ├── context/
 │   ├── indexers/               # code_parser (tree-sitter) + Qdrant/Chroma indexers
-│   └── retrievers/             # matching retrievers, selected via factory
+│   ├── retrievers/             # matching retrievers, selected via factory
+│   └── freshness.py             # incremental re-index: manifest, mtime+hash+settle-window diffing
 ├── llm/
 │   └── factory.py              # LLM + embedder construction (Anthropic, HuggingFace)
 ├── memory/
@@ -129,6 +131,7 @@ Anything not starting with `/` is treated as a question for the agent. Reserved 
 | `/sessions` | List past sessions for this project, with their summaries |
 | `/session` | Show the current session id |
 | `/remember <text>` | Save a preference to long-term memory, deterministically (no LLM judgment on whether to save) |
+| `/reindex` | Manually check for and index file changes (also happens automatically in the background) |
 | `/exit`, `/quit` | Quit |
 
 Logs (indexing, retrieval, tool calls) go to `.cloudy/cloudy.log`, not the terminal.
