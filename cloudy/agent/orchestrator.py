@@ -3,6 +3,7 @@ import time
 from langchain_core.callbacks import BaseCallbackHandler
 
 from cloudy.observability.logger import get_logger
+from cloudy.memory.session import touch_session
 
 
 logger = get_logger(__name__)
@@ -41,6 +42,8 @@ async def handle_query(agent, question: str, thread_id: str) -> tuple[str, dict]
   except Exception as e:
       logger.error(f"Agent error: {e}")
       answer = f"Error: {e}"
+
+  await touch_session(thread_id)
 
   stats = {
       "elapsed_seconds": time.monotonic() - started,

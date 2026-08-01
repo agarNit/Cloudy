@@ -9,9 +9,12 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Agentic loop** — built on LangChain/LangGraph's `create_agent`, with a system prompt that forces the agent to search the codebase before answering.
 - **Code-aware indexing** — source files are parsed with [tree-sitter](https://tree-sitter.github.io/tree-sitter/) into function/class-level chunks (Python, JS/TS, Java, Go, Rust, C/C++, C#, Ruby, PHP, Swift, Kotlin, Bash); text/config files fall back to an overlapping sliding-window chunker.
 - **Pluggable retrieval** — swap between Qdrant (dense/sparse/hybrid) and Chroma (semantic) purely via `config.yaml`, no code changes.
-- **Tool-using agent** — `search_codebase` (RAG), filesystem tools (`read_file`, `write_file`, `append_file`, `list_directory`, `file_exists`), and shell tools (`run_command`, `run_in_directory` — blocklist for a few known-dangerous commands, 30s timeout).
+- **Tool-using agent** — `search_codebase` (RAG), `find_session` (semantic search over past session summaries), `save_memory`/`recall_memory` (long-term facts/preferences), filesystem tools (`read_file`, `write_file`, `append_file`, `list_directory`, `file_exists`), and shell tools (`run_command`, `run_in_directory` — blocklist for a few known-dangerous commands, 30s timeout).
 - **MCP integration** — additional tools are loaded dynamically from external MCP servers (e.g. GitHub, filesystem) declared in `servers.json`, via `langchain-mcp-adapters`.
-- **Persistent memory** — conversations are checkpointed to SQLite (`AsyncSqliteSaver`) with automatic summarization once a conversation grows past a token threshold, plus lightweight session management (start/switch/resume).
+- **Short-term memory** — conversations are checkpointed to SQLite (`AsyncSqliteSaver`) with automatic summarization once a conversation grows past a token threshold. Strictly thread-scoped: one session never sees another's messages.
+- **Session management** — mirrors Claude Code's CLI: every launch starts a brand new session by default; `--continue`/`-c` reattaches to the most recently active one, `--resume`/`-r` lets you pick from a list — all scoped to the current project directory.
+- **Episodic memory** — when a session ends (`/new_session`, `/switch`, `/exit`, or Ctrl+C), its conversation is summarized and embedded, then stored in a `session_log` table. `/sessions` shows past sessions with their real summaries instead of bare timestamps, and the agent can call `find_session` to semantically search across all of them — e.g. "did I ask about X before?" from a brand new session. Sessions that end without a clean exit (crash, killed process) are backfilled on the next launch, so summaries stay eventually-consistent regardless of how a session actually ended.
+- **Long-term (semantic) memory** — separate from episodic session summaries: durable, cross-session facts/preferences/decisions, stored in a `long_term_memory` table under one of three categories (`preference`, `feedback`, `project`), upserted by `(category_type, category)` so re-saving the same topic updates it instead of duplicating. A compact summary index is always in the system prompt (progressive disclosure, same shape as skills); full detail loads on demand via `recall_memory`. Save trigger is hybrid: the agent auto-calls `save_memory` when the user corrects its approach or a firm project decision is reached — tested reliable (3/3+ across runs). Getting the model to *reliably volunteer* a save purely from natural-language "remember that..." proved unreliable with `claude-haiku-4-5` once multiple tools/instructions were competing for attention (0/5 in the full prompt despite 4/5 in isolation) — so explicit saves go through a deterministic `/remember <text>` command instead of depending on LLM judgment for that path.
 - **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
 - **Config-driven** — LLM provider/model, embedding model, vector store, and retrieval mode are all controlled from a single `config.yaml`.
 - **Claude-style CLI** — boxed input prompt, Markdown-rendered answers, a playful "thinking" status while the agent works, and a per-turn `elapsed time · token count` footer.
@@ -28,7 +31,7 @@ cloudy/
 │   └── tools.py                # search_codebase (RAG) tool
 ├── tools/
 │   ├── filesystem_tools.py    # read/write/append/list/exists
-│   └── terminal_tools.py      # sandboxed shell execution
+│   └── terminal_tools.py      # shell execution (blocklist + timeout, not a real sandbox)
 ├── mcp/
 │   ├── client.py               # connects to MCP servers, collects their tools
 │   └── config.py               # loads & resolves servers.json
@@ -38,8 +41,12 @@ cloudy/
 ├── llm/
 │   └── factory.py              # LLM + embedder construction (Anthropic, HuggingFace)
 ├── memory/
-│   ├── session.py               # session id lifecycle
-│   └── short_term.py            # SQLite checkpointing + summarization middleware
+│   ├── session.py               # session bookkeeping (id, created_at, last_active_at)
+│   ├── short_term.py            # SQLite checkpointing + summarization middleware
+│   ├── episodic.py              # per-session summary + embedding on close, semantic search, backfill
+│   ├── semantic.py              # long-term facts/preferences: save/recall, dedup, /remember intake
+│   ├── db.py                     # shared sqlite path for cloudy's own memory tables
+│   └── tools.py                  # find_session, save_memory, recall_memory tools
 ├── skills/
 │   └── registry.py
 ├── observability/
@@ -85,14 +92,12 @@ Adjust `cloudy/config.yaml` if you want to switch LLM model, embedding model, ve
 Run from the root of the repository you want Cloudy to index and chat about:
 
 ```bash
-poetry run cloudy
+poetry run cloudy              # always starts a brand new session
+poetry run cloudy --continue   # resume the most recently active session (-c)
+poetry run cloudy --resume     # pick a past session to resume (-r)
 ```
 
-or
-
-```bash
-python -m cloudy.main
-```
+or the equivalent with `python -m cloudy.main [--continue|--resume]`.
 
 On first run, Cloudy indexes the current directory into the configured vector store; subsequent runs reuse the existing index.
 
@@ -116,10 +121,14 @@ Anything not starting with `/` is treated as a question for the agent. Reserved 
 | `/show_index` | Inspect all indexed chunks |
 | `/new_session` | Start a fresh conversation (new memory thread) |
 | `/switch <session_id>` | Resume a previous session |
+| `/sessions` | List past sessions for this project, with their summaries |
 | `/session` | Show the current session id |
+| `/remember <text>` | Save a preference to long-term memory, deterministically (no LLM judgment on whether to save) |
 | `/exit`, `/quit` | Quit |
 
 Logs (indexing, retrieval, tool calls) go to `.cloudy/cloudy.log`, not the terminal.
+
+Note: the system prompt (including the long-term memory index) is built once per launch. A `/remember` mid-session is saved immediately, but won't be visible to the agent's own reasoning until the next launch rebuilds the prompt — same tradeoff the skills system already makes.
 
 ## Why this project exists
 
