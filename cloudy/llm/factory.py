@@ -1,7 +1,7 @@
 import threading
 from functools import lru_cache
 
-from cloudy.config import config
+from cloudy.config import config  # also sets HF_HUB_* quiet-output env vars, see config.py
 from cloudy.observability.logger import get_logger
 
 logger = get_logger(__name__)
