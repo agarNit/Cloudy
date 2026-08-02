@@ -2,8 +2,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
-from tree_sitter import Language, Parser
-from tree_sitter_languages import get_language, get_parser
+from tree_sitter_language_pack import get_parser
 
 
 from cloudy.observability.logger import get_logger
@@ -13,7 +12,7 @@ logger = get_logger(__name__)
 
 
 # Maps file extension → tree-sitter language name.
-# tree-sitter-languages bundles all these grammars, no extra installs needed.
+# tree-sitter-language-pack bundles all these grammars, no extra installs needed.
 EXTENSION_TO_LANGUAGE = {
   ".py": "python",
   ".js": "javascript",
@@ -25,7 +24,7 @@ EXTENSION_TO_LANGUAGE = {
   ".rs": "rust",
   ".cpp": "cpp",
   ".c": "c",
-  ".cs": "c_sharp",
+  ".cs": "csharp",
   ".rb": "ruby",
   ".php": "php",
   ".swift": "swift",
@@ -116,7 +115,13 @@ def _walk(node, source: str, filepath: str, chunks: list, depth: int):
   """
   if node.type in BLOCK_NODE_TYPES:
       name = _extract_name(node, source)
-      content = source[node.start_byte:node.end_byte]
+      # node.text is tree-sitter's own byte-span property — not a manual
+      # source[start_byte:end_byte] slice. That slice was a real, pre-existing
+      # bug: start_byte/end_byte are offsets into the UTF-8 *encoded* source,
+      # but source here is a Python str (char-indexed), so any multi-byte
+      # character earlier in the file — cloudy's own source uses em-dashes
+      # constantly in comments — silently shifted every extraction after it.
+      content = node.text.decode()
       chunk_type = "class" if "class" in node.type else "function"
       chunks.append(ParsedChunk(
           name=name,
@@ -138,7 +143,7 @@ def _extract_name(node, source: str) -> str:
   """Find the identifier child of a block node and return its text as the chunk name."""
   for child in node.children:
       if child.type in ("identifier", "name", "property_identifier"):
-          return source[child.start_byte:child.end_byte]
+          return child.text.decode()
   return node.type  # fallback to node type if no name found
 
 
