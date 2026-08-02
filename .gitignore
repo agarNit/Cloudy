@@ -11,6 +11,10 @@
 # Logs
 .cloudy/
 
+# Generated eval data — pulled from LangSmith traces, may contain real query content
+cloudy/evals/golden_dataset.json
+cloudy/evals/*_report.json
+
 
 # Python
 __pycache__/
