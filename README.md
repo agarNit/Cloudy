@@ -80,9 +80,9 @@ cloudy/
 ## Requirements
 
 - Python 3.12+
-- [Poetry](https://python-poetry.org/) for dependency management
+- [Poetry](https://python-poetry.org/) for dependency management (only needed for the [development setup](#development-setup))
 - Node.js + `npx` (only if you use the MCP servers declared in `servers.json`, which run via `npx`)
-- A running [Qdrant](https://qdrant.tech/) instance (Qdrant Cloud or local via Docker) — the default config uses Qdrant in hybrid mode
+- Optional: a [Qdrant](https://qdrant.tech/) instance (Qdrant Cloud or local via Docker) — the default config uses Qdrant in hybrid mode for the best retrieval quality, but if it's unset or unreachable, Cloudy automatically falls back to a local embedded Chroma store for that session, so it works out of the box with no external services
 
 ## Install
 
@@ -102,6 +102,15 @@ To pick up updates later, re-run the same command with `--force` (pipx) or `--up
 
 Cloudy also works as a library — `pip install` the same way, then `import cloudy`.
 
+Cloudy needs an `ANTHROPIC_API_KEY` at minimum. Grab the example env file and fill it in — see [Environment variables](#development-setup) below for what each one does:
+
+```bash
+curl -o .env.example https://raw.githubusercontent.com/agarNit/Cloudy/main/.env.example
+cp .env.example .env
+```
+
+Then run `cloudy` from the root of whatever repository you want it to index and chat about.
+
 ## Development setup
 
 If you're working on Cloudy itself, install from a local clone with Poetry instead so you get the locked dependency versions and an editable install:
@@ -112,13 +121,20 @@ cd Cloudy
 poetry install
 ```
 
-Create a `.env` file in the project root (or anywhere above your working directory — Cloudy looks upward from wherever you run it):
+Copy `.env.example` to `.env` and fill in your values. Cloudy looks for `.env` starting from your current working directory and walking upward, so it works whether you keep it in the project root or a parent directory:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 ANTHROPIC_API_KEY=your-anthropic-api-key
 
-QDRANT_URL=your-qdrant-url
-QDRANT_API_KEY=your-qdrant-api-key
+# Optional — Qdrant powers hybrid retrieval by default. If unset (or the
+# instance is unreachable), Cloudy automatically falls back to a local,
+# embedded Chroma store for that session — no setup required to get started.
+QDRANT_URL=
+QDRANT_API_KEY=
 
 # Optional — only needed if you enable the GitHub MCP server in servers.json
 GITHUB_TOKEN=your-github-token
@@ -136,6 +152,8 @@ LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
 LANGFUSE_HOST=
 ```
+
+The only required variable is `ANTHROPIC_API_KEY` — everything else is optional and degrades gracefully when unset.
 
 Adjust `cloudy/config.yaml` if you want to switch LLM model, embedding model, vector store provider, or retrieval mode.
 

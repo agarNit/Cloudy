@@ -12,6 +12,7 @@ from rich.prompt import Prompt
 from cloudy.config import config
 from cloudy.context.indexers.factory import get_indexer, get_index_inspector
 from cloudy.context.freshness import seed_manifest_if_empty, sync_index
+from cloudy.context.vector_store_health import qdrant_reachable
 from cloudy.llm.factory import get_llm, get_embedder
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from cloudy.agent.factory import build_agent, build_plan_agent
@@ -355,7 +356,15 @@ def _freshness_enabled() -> bool:
    # Freshness sync is Qdrant-specific (payload filters, client.delete) — only
    # wire it up when that's actually the active retrieval backend, so switching
    # config to the Chroma path doesn't crash against the wrong vector store shape.
-   return config["rag"]["mode"] == "hybrid" and config["vector_store"]["provider"] == "qdrant"
+   # qdrant_reachable() also covers the runtime fallback case: config can say
+   # "qdrant" while get_indexer() actually handed back a Chroma collection
+   # because Qdrant was unreachable at startup — checked once and cached, so
+   # this reuses that same result rather than reconnecting.
+   return (
+       config["rag"]["mode"] == "hybrid"
+       and config["vector_store"]["provider"] == "qdrant"
+       and qdrant_reachable()
+   )
 
 
 def report_freshness(result: dict, quiet_if_empty: bool = True):
