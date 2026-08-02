@@ -23,6 +23,7 @@ from cloudy.mcp.client import get_mcp_tools
 from cloudy.skills.tools import load_skill, build_skills_prompt
 from cloudy.memory.tools import find_session, save_memory, recall_memory
 from cloudy.memory.semantic import build_memory_prompt
+from cloudy.agent.caching import cache_system_and_tools
 
 
 logger = get_logger(__name__)
@@ -152,6 +153,7 @@ async def build_plan_agent(checkpointer):
           HumanInTheLoopMiddleware(interrupt_on={
               "write_todos": InterruptOnConfig(allowed_decisions=["approve", "reject"]),
           }),
+          cache_system_and_tools,
       ],
       checkpointer=checkpointer,
   )
@@ -199,6 +201,7 @@ async def build_agent(checkpointer):
       middleware=[
           TodoListMiddleware(),
           HumanInTheLoopMiddleware(interrupt_on=_build_interrupt_on(mcp_tools)),
+          cache_system_and_tools,
       ],
       checkpointer=checkpointer,
   )

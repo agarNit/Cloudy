@@ -12,11 +12,14 @@ logger = get_logger(__name__)
 
 
 class _TokenCounter(BaseCallbackHandler):
-  """Sums input/output tokens across every model call made during a single invoke."""
+  """Sums input/output/cache tokens across every model call made during a single invoke."""
 
   def __init__(self):
       self.input_tokens = 0
       self.output_tokens = 0
+      self.cache_read_tokens = 0
+      self.cache_creation_tokens = 0
+      self.tool_names: set[str] = set()
 
   def on_llm_end(self, response, **kwargs):
       for generations in response.generations:
@@ -25,6 +28,14 @@ class _TokenCounter(BaseCallbackHandler):
               if usage:
                   self.input_tokens += usage.get("input_tokens", 0)
                   self.output_tokens += usage.get("output_tokens", 0)
+                  details = usage.get("input_token_details") or {}
+                  self.cache_read_tokens += details.get("cache_read", 0)
+                  self.cache_creation_tokens += details.get("cache_creation", 0)
+
+  def on_tool_start(self, serialized, input_str, **kwargs):
+      name = (serialized or {}).get("name")
+      if name:
+          self.tool_names.add(name)
 
 
 @dataclass
@@ -45,6 +56,7 @@ class QueryResult:
   approvals: list[ApprovalRequest] = field(default_factory=list)
   todos: list[dict] = field(default_factory=list)
   stats: dict = field(default_factory=dict)
+  tool_names: set[str] = field(default_factory=set)
 
 
 def _stats(started: float, counter: _TokenCounter) -> dict:
@@ -52,6 +64,8 @@ def _stats(started: float, counter: _TokenCounter) -> dict:
       "elapsed_seconds": time.monotonic() - started,
       "input_tokens": counter.input_tokens,
       "output_tokens": counter.output_tokens,
+      "cache_read_tokens": counter.cache_read_tokens,
+      "cache_creation_tokens": counter.cache_creation_tokens,
   }
 
 
@@ -80,6 +94,7 @@ async def _invoke(agent, payload, thread_id: str) -> QueryResult:
       return QueryResult(kind="answer", answer=f"Error: {e}", stats=_stats(started, counter))
 
   result = _to_result(response, _stats(started, counter))
+  result.tool_names = counter.tool_names
   if result.kind == "answer":
       await touch_session(thread_id)
   return result

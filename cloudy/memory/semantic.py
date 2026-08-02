@@ -44,7 +44,34 @@ async def _ensure_table(db: aiosqlite.Connection) -> None:
         )
         """
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_generation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generation INTEGER NOT NULL
+        )
+        """
+    )
     await db.commit()
+
+
+async def _bump_generation(db: aiosqlite.Connection) -> None:
+    # Bumped on every save/update — semantic caching's other invalidation
+    # fingerprint, alongside freshness's index_generation.
+    await db.execute(
+        """
+        INSERT INTO memory_generation (id, generation) VALUES (1, 1)
+        ON CONFLICT(id) DO UPDATE SET generation = generation + 1
+        """
+    )
+
+
+async def get_memory_generation() -> int:
+    async with aiosqlite.connect(db_path()) as db:
+        await _ensure_table(db)
+        cursor = await db.execute("SELECT generation FROM memory_generation WHERE id = 1")
+        row = await cursor.fetchone()
+    return row[0] if row else 0
 
 
 async def save_memory(category_type: str, category: str, summary: str, content: str) -> str:
@@ -82,6 +109,7 @@ async def save_memory(category_type: str, category: str, summary: str, content: 
             """,
             (category_type, category, summary, content, created_at, now),
         )
+        await _bump_generation(db)
         await db.commit()
 
     verb = "Updated" if existing else "Saved"

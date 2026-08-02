@@ -26,6 +26,7 @@ from cloudy.agent.orchestrator import (
 from cloudy.memory.session import new_session, switch_session, list_sessions, most_recent_session
 from cloudy.memory.episodic import close_session, backfill_missing_summaries, get_summaries
 from cloudy.memory.semantic import remember
+from cloudy.agent import semantic_cache
 from cloudy.observability.logger import get_logger
 
 
@@ -171,6 +172,9 @@ def _accumulate(total: dict, stats: dict):
    total["input_tokens"] += stats.get("input_tokens", 0)
    total["output_tokens"] += stats.get("output_tokens", 0)
 
+   total["cache_read_tokens"] += stats.get("cache_read_tokens", 0)
+   total["cache_creation_tokens"] += stats.get("cache_creation_tokens", 0)
+
 
 async def drive_to_completion(
    agent, session_id: str, result: QueryResult, status_label: str = "Working", loop_through: bool = True
@@ -186,8 +190,12 @@ async def drive_to_completion(
    Returns (result, decisions_made, accumulated_stats).
    """
    decisions_made: list[tuple[ApprovalRequest, dict]] = []
-   total_stats = {"elapsed_seconds": 0.0, "input_tokens": 0, "output_tokens": 0}
+   total_stats = {
+       "elapsed_seconds": 0.0, "input_tokens": 0, "output_tokens": 0,
+       "cache_read_tokens": 0, "cache_creation_tokens": 0,
+   }
    _accumulate(total_stats, result.stats)
+   all_tool_names: set[str] = set(result.tool_names)
 
    first_round = True
    while result.kind == "approval" and (first_round or loop_through):
@@ -200,7 +208,9 @@ async def drive_to_completion(
        with console.status(f"[{ACCENT}]{status_label}…[/{ACCENT}]", spinner="dots"):
            result = await resume_query(agent, decisions, session_id)
        _accumulate(total_stats, result.stats)
+       all_tool_names |= result.tool_names
 
+   result.tool_names = all_tool_names
    return result, decisions_made, total_stats
 
 
@@ -211,7 +221,8 @@ async def run_turn(agent, question: str, session_id: str, status_label: str = "W
 
 
 async def handle_turn(
-   agent, question: str, session_id: str, status_label: str = "Working", loop_through: bool = True
+   agent, question: str, session_id: str, status_label: str = "Working", loop_through: bool = True,
+   use_cache: bool = False,
 ) -> dict | None:
    """Run one logical turn to completion and render the result. Returns None if
    the turn was cancelled via Ctrl+C — the turn itself is abandoned, but any
@@ -221,7 +232,20 @@ async def handle_turn(
    With loop_through=False, the turn can end still holding a fresh pending
    approval (the model reacted to a rejection by proposing again right away) —
    that's surfaced, not silently resolved, and control returns to the CLI.
+
+   use_cache=True checks the semantic cache first and skips the agent
+   invocation entirely on a hit, then stores a fresh answer afterward if the
+   turn only used cache-eligible tools. Only the plain chat-mode call site
+   passes this — plan mode and post-approval execution aren't simple
+   repeatable Q&A, so they're never cached.
    """
+   if use_cache:
+       cached_answer = await semantic_cache.lookup(question)
+       if cached_answer is not None:
+           console.print(Markdown(cached_answer))
+           console.print(f"[dim]instant · cached[/dim]\n")
+           return {"plan_approved": False, "todos": [], "pending": False}
+
    try:
        result, decisions, stats = await run_turn(agent, question, session_id, status_label, loop_through)
    except KeyboardInterrupt:
@@ -242,7 +266,12 @@ async def handle_turn(
        console.print(Markdown(result.answer))
    print_progress(result.todos)
    total_tokens = stats["input_tokens"] + stats["output_tokens"]
-   console.print(f"[dim]{stats['elapsed_seconds']:.1f}s · {_format_tokens(total_tokens)} tokens[/dim]\n")
+   cache_read = stats.get("cache_read_tokens", 0)
+   cache_note = f" · {_format_tokens(cache_read)} cached" if cache_read else ""
+   console.print(f"[dim]{stats['elapsed_seconds']:.1f}s · {_format_tokens(total_tokens)} tokens{cache_note}[/dim]\n")
+
+   if use_cache and result.answer and semantic_cache.is_cacheable_turn(result.tool_names):
+       await semantic_cache.store(question, result.answer)
 
    plan_approved = any(
        req.name == "write_todos" and dec["type"] == "approve" for req, dec in decisions
@@ -443,7 +472,7 @@ async def _run_async(args: argparse.Namespace):
                        if new_mode:
                            mode = new_mode
                    else:
-                       await handle_turn(agent, user_input, session_id, random.choice(STATUS_WORDS))
+                       await handle_turn(agent, user_input, session_id, random.choice(STATUS_WORDS), use_cache=True)
                    continue
 
                command, _, arg = user_input.partition(" ")

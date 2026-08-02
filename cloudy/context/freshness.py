@@ -36,7 +36,35 @@ async def _ensure_table(db: aiosqlite.Connection) -> None:
         )
         """
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS index_generation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generation INTEGER NOT NULL
+        )
+        """
+    )
     await db.commit()
+
+
+async def _bump_generation(db: aiosqlite.Connection) -> None:
+    # Bumped only when a sync actually changes something — this is the
+    # fingerprint semantic caching uses to know a cached answer might now be
+    # stale. A sync that finds nothing changed doesn't touch it.
+    await db.execute(
+        """
+        INSERT INTO index_generation (id, generation) VALUES (1, 1)
+        ON CONFLICT(id) DO UPDATE SET generation = generation + 1
+        """
+    )
+
+
+async def get_index_generation() -> int:
+    async with aiosqlite.connect(db_path()) as db:
+        await _ensure_table(db)
+        cursor = await db.execute("SELECT generation FROM index_generation WHERE id = 1")
+        row = await cursor.fetchone()
+    return row[0] if row else 0
 
 
 def _hash_file(filepath: str) -> str:
@@ -209,5 +237,9 @@ async def sync_index(repo_path: str, vector_store) -> dict:
         logger.info(
             f"Freshness sync: {len(added)} added, {len(updated)} updated, {len(deleted)} deleted"
         )
+        async with aiosqlite.connect(db_path()) as db:
+            await _ensure_table(db)
+            await _bump_generation(db)
+            await db.commit()
 
     return {"added": added, "updated": updated, "deleted": deleted, "skipped_unsettled": skipped_unsettled}
