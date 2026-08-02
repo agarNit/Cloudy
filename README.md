@@ -84,13 +84,35 @@ cloudy/
 - Node.js + `npx` (only if you use the MCP servers declared in `servers.json`, which run via `npx`)
 - A running [Qdrant](https://qdrant.tech/) instance (Qdrant Cloud or local via Docker) — the default config uses Qdrant in hybrid mode
 
-## Setup
+## Install
+
+Install the `cloudy` command directly from GitHub with [pipx](https://pipx.pypa.io/) (recommended — keeps it in its own isolated environment):
 
 ```bash
+pipx install git+https://github.com/agarNit/Cloudy.git
+```
+
+Plain `pip` works too, if you'd rather manage the environment yourself:
+
+```bash
+pip install git+https://github.com/agarNit/Cloudy.git
+```
+
+To pick up updates later, re-run the same command with `--force` (pipx) or `--upgrade` (pip).
+
+Cloudy also works as a library — `pip install` the same way, then `import cloudy`.
+
+## Development setup
+
+If you're working on Cloudy itself, install from a local clone with Poetry instead so you get the locked dependency versions and an editable install:
+
+```bash
+git clone https://github.com/agarNit/Cloudy.git
+cd Cloudy
 poetry install
 ```
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (or anywhere above your working directory — Cloudy looks upward from wherever you run it):
 
 ```env
 ANTHROPIC_API_KEY=your-anthropic-api-key
@@ -122,10 +144,12 @@ Adjust `cloudy/config.yaml` if you want to switch LLM model, embedding model, ve
 Run from the root of the repository you want Cloudy to index and chat about:
 
 ```bash
-poetry run cloudy              # always starts a brand new session
-poetry run cloudy --continue   # resume the most recently active session (-c)
-poetry run cloudy --resume     # pick a past session to resume (-r)
+cloudy              # always starts a brand new session
+cloudy --continue   # resume the most recently active session (-c)
+cloudy --resume     # pick a past session to resume (-r)
 ```
+
+(If you're working from a local clone via the Poetry [development setup](#development-setup) instead of a pipx/pip install, prefix each of these with `poetry run`.)
 
 or the equivalent with `python -m cloudy.main [--continue|--resume]`.
 

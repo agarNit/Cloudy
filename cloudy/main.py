@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import random
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -34,7 +34,10 @@ from langchain.agents.middleware._redaction import PIIDetectionError
 from cloudy.observability.logger import get_logger
 
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+# Find .env by walking up from the current working directory rather than the
+# package's install location, so this still works when cloudy is installed
+# from a wheel/pipx and run from a user's own project directory.
+load_dotenv(find_dotenv(usecwd=True))
 
 
 ACCENT = "#D97757"
