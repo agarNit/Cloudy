@@ -14,6 +14,10 @@ _REPO = "agarNit/Cloudy"
 _LATEST_RELEASE_URL = f"https://api.github.com/repos/{_REPO}/releases/latest"
 _CACHE_PATH = Path.home() / ".cloudy" / "update_check.json"
 _CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+# A failed fetch (network hiccup, or — as actually happened — checking in the window
+# before a release existed yet) gets a much shorter retry window than a successful one,
+# so it can't silently go quiet on real updates for a full day.
+_RETRY_INTERVAL_SECONDS = 60 * 60
 _REQUEST_TIMEOUT_SECONDS = 2
 
 UPGRADE_COMMAND = f"pipx install --force git+https://github.com/{_REPO}.git"
@@ -59,14 +63,19 @@ def _save_cache(data: dict) -> None:
 def check_for_update() -> str | None:
     """Return the latest released version if it's newer than this install, else None.
 
-    Hits the GitHub API at most once every 24h (cached to disk under ~/.cloudy/) so a
-    normal launch doesn't pay for a network round trip. Never raises — a failed or slow
-    check should never block or break a normal cloudy session, just skip the notice.
+    Hits the GitHub API at most once every 24h after a successful check (cached to disk
+    under ~/.cloudy/) so a normal launch doesn't pay for a network round trip. A failed
+    check (network hiccup, or a 404 because no release existed yet) only holds off the
+    next attempt for an hour, not a full day — otherwise a single bad-timed check could
+    silently sit on a real update notice for 24h even after the underlying problem is
+    gone. Never raises — a failed or slow check should never block or break a normal
+    cloudy session, just skip the notice.
     """
     cache = _load_cache()
     latest = cache.get("latest_version")
+    interval = _CHECK_INTERVAL_SECONDS if latest else _RETRY_INTERVAL_SECONDS
 
-    if time.time() - cache.get("checked_at", 0) > _CHECK_INTERVAL_SECONDS:
+    if time.time() - cache.get("checked_at", 0) > interval:
         fetched = _fetch_latest_version()
         latest = fetched or latest
         _save_cache({"checked_at": time.time(), "latest_version": latest})
