@@ -6,12 +6,13 @@ from langchain.agents.middleware import (
   HumanInTheLoopMiddleware,
   InterruptOnConfig,
 )
+from langchain.agents.middleware.shell_tool import ShellToolMiddleware
 
 
 from cloudy.llm.factory import get_llm
 from cloudy.agent.tools import search_codebase
 from cloudy.observability.logger import get_logger
-from cloudy.tools.terminal_tools import run_command, run_in_directory
+from cloudy.tools.sandbox import detect_execution_policy
 from cloudy.tools.filesystem_tools import (
   read_file,
   write_file,
@@ -24,6 +25,8 @@ from cloudy.skills.tools import load_skill, build_skills_prompt
 from cloudy.memory.tools import find_session, save_memory, recall_memory
 from cloudy.memory.semantic import build_memory_prompt
 from cloudy.agent.caching import cache_system_and_tools
+from cloudy.agent.content_safety import build_pii_middleware
+from cloudy.agent.limits import build_execution_limits, build_plan_limits
 
 
 logger = get_logger(__name__)
@@ -111,10 +114,7 @@ def _build_interrupt_on(mcp_tools) -> dict:
   interrupt_on = {
       "write_file": InterruptOnConfig(allowed_decisions=["approve", "reject"]),
       "append_file": InterruptOnConfig(allowed_decisions=["approve", "reject"]),
-      "run_command": InterruptOnConfig(
-          allowed_decisions=["approve", "reject"], when=_is_dangerous_command
-      ),
-      "run_in_directory": InterruptOnConfig(
+      "shell": InterruptOnConfig(
           allowed_decisions=["approve", "reject"], when=_is_dangerous_command
       ),
   }
@@ -153,20 +153,28 @@ async def build_plan_agent(checkpointer):
           HumanInTheLoopMiddleware(interrupt_on={
               "write_todos": InterruptOnConfig(allowed_decisions=["approve", "reject"]),
           }),
+          *build_pii_middleware(),
+          *build_plan_limits(),
           cache_system_and_tools,
       ],
       checkpointer=checkpointer,
   )
 
 
-async def build_agent(checkpointer):
+async def build_agent(checkpointer, repo_path: str, execution_policy=None):
   """Create and return the full execution agent with persistent memory. Write/dangerous
   tools require approval via HumanInTheLoopMiddleware; everything read-only or already
   scoped to cloudy's own memory store (save_memory, recall_memory) auto-approves.
+
+  The shell tool is confined to repo_path via execution_policy (Docker/Seatbelt/host —
+  see cloudy.tools.sandbox.detect_execution_policy) so commands can't read or write
+  outside the project even before the HITL gate is considered.
   """
   llm = get_llm()
   mcp_tools = await get_mcp_tools()
 
+  if execution_policy is None:
+      execution_policy, _ = detect_execution_policy()
 
   skills_prompt = build_skills_prompt()
   memory_prompt = await build_memory_prompt()
@@ -183,8 +191,6 @@ async def build_agent(checkpointer):
       find_session,
       save_memory,
       recall_memory,
-      run_command,
-      run_in_directory,
       read_file,
       write_file,
       append_file,
@@ -200,7 +206,10 @@ async def build_agent(checkpointer):
       system_prompt=full_prompt,
       middleware=[
           TodoListMiddleware(),
+          ShellToolMiddleware(workspace_root=repo_path, execution_policy=execution_policy),
           HumanInTheLoopMiddleware(interrupt_on=_build_interrupt_on(mcp_tools)),
+          *build_pii_middleware(),
+          *build_execution_limits(),
           cache_system_and_tools,
       ],
       checkpointer=checkpointer,

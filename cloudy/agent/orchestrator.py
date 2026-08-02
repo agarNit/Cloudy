@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass, field
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain.agents.middleware._redaction import PIIDetectionError
 from langgraph.types import Command
 
 from cloudy.observability.logger import get_logger
@@ -89,6 +90,13 @@ async def _invoke(agent, payload, thread_id: str) -> QueryResult:
   started = time.monotonic()
   try:
       response = await agent.ainvoke(payload, agent_config)
+  except PIIDetectionError as e:
+      logger.info(f"Blocked on {e.pii_type}: {len(e.matches)} match(es)")
+      answer = (
+          f"This looks like it contains {e.pii_type.replace('_', ' ')} data, which I can't "
+          f"process — please remove it and try again."
+      )
+      return QueryResult(kind="answer", answer=answer, stats=_stats(started, counter))
   except Exception as e:
       logger.error(f"Agent error: {e}")
       return QueryResult(kind="answer", answer=f"Error: {e}", stats=_stats(started, counter))

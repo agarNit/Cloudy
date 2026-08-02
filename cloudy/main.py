@@ -27,6 +27,9 @@ from cloudy.memory.session import new_session, switch_session, list_sessions, mo
 from cloudy.memory.episodic import close_session, backfill_missing_summaries, get_summaries
 from cloudy.memory.semantic import remember
 from cloudy.agent import semantic_cache
+from cloudy.agent.content_safety import redact_text
+from cloudy.tools.sandbox import detect_execution_policy
+from langchain.agents.middleware._redaction import PIIDetectionError
 from cloudy.observability.logger import get_logger
 
 
@@ -410,19 +413,21 @@ async def resolve_session_id(args: argparse.Namespace) -> str:
    return await new_session()
 
 
-async def initialize(checkpointer):
+async def initialize(checkpointer, repo_path: str):
    """Bootstrap LLM, embedder, index, and both agents before the REPL starts."""
    with console.status(f"[{ACCENT}]Starting up…[/{ACCENT}]", spinner="dots"):
        llm = get_llm()
        embedder = get_embedder()
        index = get_or_create_index()
-       agent = await build_agent(checkpointer)
+       execution_policy, sandbox_label = detect_execution_policy()
+       agent = await build_agent(checkpointer, repo_path, execution_policy)
        plan_agent = await build_plan_agent(checkpointer)
 
    console.print(
        f"[dim]{config['llm']['provider']}/{config['llm']['model']} · "
        f"{config['embeddings']['provider']}/{config['embeddings']['model']}[/dim]"
    )
+   console.print(f"[dim]sandbox: {sandbox_label}[/dim]")
    return llm, embedder, index, agent, plan_agent
 
 
@@ -436,7 +441,7 @@ async def _run_async(args: argparse.Namespace):
    async with AsyncSqliteSaver.from_conn_string(get_checkpointer_db_path()) as checkpointer:
        with console.status(f"[{ACCENT}]Checking session history…[/{ACCENT}]", spinner="dots"):
            await backfill_missing_summaries(checkpointer)
-       llm, embedder, index, agent, plan_agent = await initialize(checkpointer)
+       llm, embedder, index, agent, plan_agent = await initialize(checkpointer, repo_path)
        console.print(f"[dim]session {session_id[:8]}[/dim]\n")
 
        await check_pending_approval(agent, session_id)
@@ -522,8 +527,20 @@ async def _run_async(args: argparse.Namespace):
                    if not arg.strip():
                        console.print(f"[yellow]Usage: /remember <text to save as a preference>[/yellow]\n")
                    else:
+                       try:
+                           sanitized, redacted_types = redact_text(arg)
+                       except PIIDetectionError as e:
+                           console.print(
+                               f"[yellow]This looks like it contains {e.pii_type.replace('_', ' ')} "
+                               f"data — refusing to save it. Please remove it and try again.[/yellow]\n"
+                           )
+                           continue
+                       if redacted_types:
+                           console.print(
+                               f"[dim]Note: redacted {', '.join(redacted_types)} before saving.[/dim]"
+                           )
                        with console.status(f"[{ACCENT}]Saving…[/{ACCENT}]", spinner="dots"):
-                           result = await remember(arg)
+                           result = await remember(sanitized)
                        console.print(f"[{ACCENT}]{result}[/{ACCENT}]\n")
                elif command == "/reindex":
                    if not _freshness_enabled():
