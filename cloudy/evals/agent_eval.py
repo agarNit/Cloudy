@@ -54,7 +54,7 @@ class AgentEvalReport:
 async def _run_case(agent, entry: dict, semaphore: asyncio.Semaphore) -> AgentCaseResult:
     async with semaphore:
         thread_id = f"eval-{uuid.uuid4()}"
-        result = await handle_query(agent, entry["query"], thread_id)
+        result = await handle_query(agent, entry["query"], thread_id, environment="eval")
 
     expected_tools = set(entry.get("tools_called") or [])
     actual_tools = set(result.tool_names)

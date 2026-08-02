@@ -29,6 +29,7 @@ from cloudy.memory.semantic import remember
 from cloudy.agent import semantic_cache
 from cloudy.agent.content_safety import redact_text
 from cloudy.tools.sandbox import detect_execution_policy
+from cloudy.observability.langfuse_handler import flush_langfuse
 from langchain.agents.middleware._redaction import PIIDetectionError
 from cloudy.observability.logger import get_logger
 
@@ -568,6 +569,7 @@ async def _run_async(args: argparse.Namespace):
            # killed outright (SIGKILL, terminal force-closed); backfill_missing_summaries
            # above is what catches that case, on the next launch.
            await close_session(checkpointer, session_id)
+           flush_langfuse()
 
 
 def run():

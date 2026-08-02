@@ -24,7 +24,7 @@ It runs as a CLI REPL that indexes your repository, retrieves relevant code for 
 - **Content safety** — secrets, credentials, and PII are caught before they ever leave the process, not just before being displayed. Built on LangChain's `PIIMiddleware`, applied to agent input, output, *and tool results* — the last one matters most: a secret sitting in an indexed file is redacted before it ever becomes part of the model's reasoning context, not just before it's shown to you. Covers email/IP/MAC/URL plus custom patterns for real credential formats (AWS keys, GitHub/Anthropic/OpenAI tokens, private key blocks); credit card numbers are blocked outright (Luhn-validated, not just digit-counted) rather than redacted, since there's rarely a legitimate reason to type a real one into a coding assistant. `/remember` gets the same protection through a separate code path, reusing the identical detectors — it bypasses the agent entirely (writes to long-term memory directly), so middleware alone can't see it, and it's arguably the highest-stakes entry point anyway, since anything saved there is injected into every future session's system prompt. Verified end-to-end: a secret typed into a question never reached Anthropic's API (confirmed on the actual wire payload); a secret typed into `/remember` never reached long-term memory storage.
 - **Sandboxing** — the `shell` tool runs inside real OS-level isolation, not just a command denylist. Built on LangChain's `ShellToolMiddleware` with a custom `BaseExecutionPolicy`, auto-detected at startup with no configuration needed: Docker if the daemon happens to be reachable (disposable container, network disabled, memory/CPU limits), otherwise a hand-written macOS Seatbelt (`sandbox-exec`) profile (writes confined to the project directory, network denied by omission, everything else allowed) — this is the realistic default tier, since Docker isn't always running and matches how Claude Code itself sandboxes without depending on it — and a resource-limited host fallback everywhere else. The active tier is printed at startup for transparency. Verified through the real agent end-to-end, not just a standalone bash test of the profile: a write outside the workspace fails with `Operation not permitted` and the file is never created; a `curl` to an external host fails with `CURLE_COULDNT_RESOLVE_HOST` (DNS itself is blocked); ordinary commands and writes inside the workspace work normally; and destructive commands (`rm`, etc.) still correctly trigger the HITL approval gate before the sandbox is ever reached.
 - **Runaway-loop / cost caps** — a per-turn safety net (`ModelCallLimitMiddleware` + `ToolCallLimitMiddleware`) against a reasoning cycle that never converges or a tool retried endlessly, not a tight budget: limits are set well above what a real multi-step turn needs (25 model calls / 40 tool calls for the execution agent, 15/25 for the read-only plan agent), plus a tighter cap specifically on repeated `shell` retries (15), since a stuck command retry loop has real side-effect risk beyond just tokens. Exit behavior was verified live, not just assumed from the docs: `exit_behavior="end"` on the model-call limit produces a clean `AIMessage` appended to `state["messages"]` — no exception, no interrupt — so it flows straight through the existing answer path with zero special-casing in the orchestrator; `exit_behavior="continue"` on the tool-call limit was specifically chosen over `"end"` after confirming it survives cloudy's parallel tool-calling (`search_codebase` fan-out) without crashing, where `"end"` is documented to raise `NotImplementedError` if other parallel calls are still pending.
-- **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL.
+- **Observability** — structured logging across every layer (indexing, retrieval, LLM calls, tool calls), written to `.cloudy/cloudy.log` so it never clutters the REPL. Tracing is split across two tools deliberately, not redundantly: LangSmith (already the eval golden dataset's data source) for per-trace debugging, and Langfuse — added alongside it, not instead of it — for the aggregated cost/latency/usage-over-time dashboards LangSmith doesn't provide out of the box. Both are wired the same way: credentials come from env vars only, never hardcoded, so each user (including anyone else running this project) sees only their own traces in their own account. Verified directly: a Langfuse `CallbackHandler` with no credentials configured degrades to a silent no-op instead of raising, and both tracers were confirmed running simultaneously on the same real agent call with zero interference. Instrumented per Langfuse's own current best-practices guidance (fetched live, not assumed from memory — their SDK's integration API changed meaningfully at v4): every turn is wrapped in `propagate_attributes(session_id=..., environment=...)` so a whole conversation groups into one Langfuse session (cloudy's own thread_id), and eval-harness traffic is tagged `environment="eval"` separately from real interactive usage (`"development"`) so automated eval runs don't pollute usage dashboards.
 - **Config-driven** — LLM provider/model, embedding model, vector store, and retrieval mode are all controlled from a single `config.yaml`.
 - **Claude-style CLI** — boxed input prompt, Markdown-rendered answers, a playful "thinking" status while the agent works, and a per-turn `elapsed time · token count` footer.
 
@@ -63,8 +63,17 @@ cloudy/
 │   └── tools.py                  # find_session, save_memory, recall_memory tools
 ├── skills/
 │   └── registry.py
+├── evals/
+│   ├── build_golden_dataset.py    # mines LangSmith traces -> golden_dataset.json, merges additively
+│   ├── retrieval_metrics.py       # precision@k / recall@k / MRR@k against frozen contexts
+│   ├── agent_eval.py              # tool-selection accuracy, re-runs self-contained queries concurrently
+│   ├── judge.py                   # LLM-as-judge: claim decomposition (faithfulness) + baseline comparison
+│   ├── correction_loop.py         # buckets failures by layer, suggests concrete prompt/config fixes
+│   ├── common.py                  # filters out continuation-dependent (non-standalone) queries
+│   └── run_evals.py               # orchestrates the full loop, writes latest_report.json
 ├── observability/
-│   └── logger.py
+│   ├── logger.py
+│   └── langfuse_handler.py        # cached CallbackHandler; no-ops if credentials aren't set
 └── servers.json                # declares available MCP servers
 ```
 
@@ -92,11 +101,18 @@ QDRANT_API_KEY=your-qdrant-api-key
 # Optional — only needed if you enable the GitHub MCP server in servers.json
 GITHUB_TOKEN=your-github-token
 
-# Optional — LangSmith tracing
+# Optional — LangSmith tracing (also feeds the eval golden dataset — see Evals below)
 LANGSMITH_TRACING=
 LANGSMITH_ENDPOINT=
 LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=
+
+# Optional — Langfuse (cost/latency/usage dashboards; sign up free or self-host).
+# Runs alongside LangSmith, not instead of it — each covers a different job.
+# Safe to leave unset: the handler degrades to a silent no-op with no credentials.
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_HOST=
 ```
 
 Adjust `cloudy/config.yaml` if you want to switch LLM model, embedding model, vector store provider, or retrieval mode.

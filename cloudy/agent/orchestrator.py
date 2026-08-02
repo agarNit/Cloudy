@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain.agents.middleware._redaction import PIIDetectionError
 from langgraph.types import Command
+from langfuse import propagate_attributes
 
 from cloudy.observability.logger import get_logger
+from cloudy.observability.langfuse_handler import get_langfuse_handler
 from cloudy.memory.session import touch_session
 
 
@@ -84,12 +86,21 @@ def _to_result(response: dict, stats: dict) -> QueryResult:
   return QueryResult(kind="answer", answer=answer, todos=todos, stats=stats)
 
 
-async def _invoke(agent, payload, thread_id: str) -> QueryResult:
+async def _invoke(agent, payload, thread_id: str, environment: str = "development") -> QueryResult:
   counter = _TokenCounter()
-  agent_config = {"configurable": {"thread_id": thread_id}, "callbacks": [counter]}
+  agent_config = {
+      "configurable": {"thread_id": thread_id},
+      "callbacks": [counter, get_langfuse_handler()],
+  }
   started = time.monotonic()
   try:
-      response = await agent.ainvoke(payload, agent_config)
+      # session_id groups this whole conversation into one Langfuse session; environment
+      # keeps eval-script traffic ("eval") separate from real interactive usage
+      # ("development") in the dashboard. Must wrap ainvoke itself — propagate_attributes
+      # only applies to spans created after entering the context, and the root span is
+      # created the moment ainvoke starts.
+      with propagate_attributes(session_id=thread_id, environment=environment):
+          response = await agent.ainvoke(payload, agent_config)
   except PIIDetectionError as e:
       logger.info(f"Blocked on {e.pii_type}: {len(e.matches)} match(es)")
       answer = (
@@ -108,12 +119,14 @@ async def _invoke(agent, payload, thread_id: str) -> QueryResult:
   return result
 
 
-async def handle_query(agent, question: str, thread_id: str) -> QueryResult:
+async def handle_query(agent, question: str, thread_id: str, environment: str = "development") -> QueryResult:
   """Entry point for a new user question — may return a final answer or a pending
   approval if a HumanInTheLoopMiddleware gate fires during this turn.
   """
   logger.info(f"Handling query for session {thread_id}: {question}")
-  return await _invoke(agent, {"messages": [{"role": "user", "content": question}]}, thread_id)
+  return await _invoke(
+      agent, {"messages": [{"role": "user", "content": question}]}, thread_id, environment
+  )
 
 
 async def resume_query(agent, decisions: list[dict], thread_id: str) -> QueryResult:

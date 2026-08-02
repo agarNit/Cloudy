@@ -17,6 +17,7 @@ from cloudy.evals.correction_loop import run_correction_loop
 from cloudy.evals.judge import judge_case
 from cloudy.evals.retrieval_metrics import evaluate_retrieval
 from cloudy.observability.logger import get_logger
+from cloudy.observability.langfuse_handler import flush_langfuse
 
 
 logger = get_logger(__name__)
@@ -119,4 +120,9 @@ async def run_full_eval() -> dict:
 
 if __name__ == "__main__":
     load_dotenv()
-    asyncio.run(run_full_eval())
+    try:
+        asyncio.run(run_full_eval())
+    finally:
+        # Short-lived script — Langfuse batches spans on an interval, so the most
+        # recent traces would be lost on process exit without an explicit flush.
+        flush_langfuse()
