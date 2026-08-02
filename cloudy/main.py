@@ -9,10 +9,12 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 
+from cloudy import __version__
 from cloudy.config import config
 from cloudy.context.indexers.factory import get_indexer, get_index_inspector
 from cloudy.context.freshness import seed_manifest_if_empty, sync_index
 from cloudy.context.vector_store_health import qdrant_reachable
+from cloudy.update_check import UPGRADE_COMMAND, check_for_update
 from cloudy.llm.factory import get_llm, get_embedder
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from cloudy.agent.factory import build_agent, build_plan_agent
@@ -81,6 +83,7 @@ COMMANDS = {
 
 def parse_args() -> argparse.Namespace:
    parser = argparse.ArgumentParser(prog="cloudy", description="Cloudy — RAG-powered code assistant")
+   parser.add_argument("--version", action="version", version=f"cloudy {__version__}")
    group = parser.add_mutually_exclusive_group()
    group.add_argument(
        "-c", "--continue", dest="continue_session", action="store_true",
@@ -449,6 +452,10 @@ async def _run_async(args: argparse.Namespace):
    repo_path = str(Path.cwd())
    print_welcome(repo_path)
 
+   # Kicked off now so the (at most once/day, 2s-timeout) network check overlaps
+   # with indexing/agent setup below instead of adding to startup latency.
+   update_check_task = asyncio.create_task(asyncio.to_thread(check_for_update))
+
    session_id = await resolve_session_id(args)
 
    async with AsyncSqliteSaver.from_conn_string(get_checkpointer_db_path()) as checkpointer:
@@ -456,6 +463,14 @@ async def _run_async(args: argparse.Namespace):
            await backfill_missing_summaries(checkpointer)
        llm, embedder, index, agent, plan_agent = await initialize(checkpointer, repo_path)
        console.print(f"[dim]session {session_id[:8]}[/dim]\n")
+
+       latest_version = await update_check_task
+       if latest_version:
+           console.print(
+               f"[dim]A new version of cloudy is available: {latest_version} "
+               f"(you have {__version__}). Upgrade with:[/dim]\n"
+               f"[dim]  {UPGRADE_COMMAND}[/dim]\n"
+           )
 
        await check_pending_approval(agent, session_id)
 
