@@ -2,7 +2,16 @@ import os
 from langchain.tools import tool
 
 
-_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+# Claude's context window is 200k tokens. At ~3.3 chars/token (Anthropic's own
+# estimate for dense text) the old 10MB cap could alone produce ~3M tokens —
+# enough to blow the entire context window in a single tool call, and enough
+# to get stuck there: SummarizationMiddleware's "keep last N messages" policy
+# preserves the most recent messages whole regardless of size, so one
+# oversized result parked in that tail broke every subsequent turn (including
+# a trivial "Hi") until it aged out. 200KB is generous for real source files
+# and caps a single result at roughly 60k tokens worst case, leaving plenty of
+# room for everything else in context.
+_MAX_FILE_SIZE_BYTES = 200_000
 
 
 @tool

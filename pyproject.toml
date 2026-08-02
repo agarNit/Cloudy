@@ -1,6 +1,6 @@
 [project]
 name = "cloudy"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cloudy — a RAG-powered coding assistant CLI"
 readme = "README.md"
 authors = [
