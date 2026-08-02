@@ -27,6 +27,7 @@ from cloudy.memory.semantic import build_memory_prompt
 from cloudy.agent.caching import cache_system_and_tools
 from cloudy.agent.content_safety import build_pii_middleware
 from cloudy.agent.limits import build_execution_limits, build_plan_limits
+from cloudy.agent.tool_output_guard import truncate_oversized_tool_results
 
 
 logger = get_logger(__name__)
@@ -156,6 +157,7 @@ async def build_plan_agent(checkpointer):
           *build_pii_middleware(),
           *build_plan_limits(),
           cache_system_and_tools,
+          truncate_oversized_tool_results,
       ],
       checkpointer=checkpointer,
   )
@@ -211,6 +213,7 @@ async def build_agent(checkpointer, repo_path: str, execution_policy=None):
           *build_pii_middleware(),
           *build_execution_limits(),
           cache_system_and_tools,
+          truncate_oversized_tool_results,
       ],
       checkpointer=checkpointer,
   )

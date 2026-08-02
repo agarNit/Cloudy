@@ -2,7 +2,10 @@ import time
 from dataclasses import dataclass, field
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.exceptions import ContextOverflowError
+from langchain_core.messages import RemoveMessage
 from langchain.agents.middleware._redaction import PIIDetectionError
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 from langfuse import propagate_attributes
 
@@ -12,6 +15,40 @@ from cloudy.memory.session import touch_session
 
 
 logger = get_logger(__name__)
+
+# Matches the tool-result cap in cloudy.agent.tool_output_guard — used here to spot
+# which checkpointed message(s) are actually large enough to be the cause of an
+# overflow, so just those can be dropped instead of nuking the whole conversation.
+_OVERSIZED_MESSAGE_CHARS = 200_000
+
+
+async def _recover_from_context_overflow(agent, thread_id: str) -> None:
+    """A context-overflow error means the checkpointed history for this thread is now
+    too large to ever send to the model again — left alone, every future turn on this
+    thread fails identically, permanently, even a trivial "Hi" (this is exactly what
+    happened before truncate_oversized_tool_results existed: a single huge tool result
+    got pinned in SummarizationMiddleware's "keep last N messages" window forever).
+    Strip whatever's oversized so the session can keep going instead of staying wedged.
+
+    Tries to drop just the individual message(s) big enough to be the cause. Falls back
+    to clearing the whole history if nothing single is large enough to explain it — an
+    accumulation of many smaller messages, which can't be fixed surgically.
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = await agent.aget_state(config)
+    messages = snapshot.values.get("messages", [])
+
+    oversized = [
+        m for m in messages
+        if isinstance(getattr(m, "content", None), str) and len(m.content) > _OVERSIZED_MESSAGE_CHARS
+    ]
+
+    if oversized:
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=m.id) for m in oversized]})
+        logger.warning(f"Context overflow on {thread_id}: dropped {len(oversized)} oversized message(s)")
+    else:
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]})
+        logger.warning(f"Context overflow on {thread_id}: no single oversized message found, cleared history")
 
 
 class _TokenCounter(BaseCallbackHandler):
@@ -106,6 +143,15 @@ async def _invoke(agent, payload, thread_id: str, environment: str = "developmen
       answer = (
           f"This looks like it contains {e.pii_type.replace('_', ' ')} data, which I can't "
           f"process — please remove it and try again."
+      )
+      return QueryResult(kind="answer", answer=answer, stats=_stats(started, counter))
+  except ContextOverflowError as e:
+      logger.error(f"Context overflow on {thread_id}: {e}")
+      await _recover_from_context_overflow(agent, thread_id)
+      answer = (
+          "This conversation's history grew too large for the model's context window, "
+          "so I've cleared the oversized part of it. You can keep chatting in this "
+          "session — some earlier context may be gone, but everything else is intact."
       )
       return QueryResult(kind="answer", answer=answer, stats=_stats(started, counter))
   except Exception as e:
